@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+node_modules/
+backend/uploads/
+backend/vectordb_store/
+frontend/dist/

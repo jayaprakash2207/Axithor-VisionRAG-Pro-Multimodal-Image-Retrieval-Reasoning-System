@@ -1,0 +1,146 @@
+# ──────────────────────────────────────────────────────────
+#  Multimodal Image RAG — Docker Compose
+#  Services: FastAPI backend, ChromaDB, Ollama, React frontend
+# ──────────────────────────────────────────────────────────
+
+services:
+
+  # ── FastAPI Backend ───────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: image-rag-backend
+    restart: unless-stopped
+    environment:
+      - APP_NAME=Multimodal Image RAG
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000,http://frontend:5173
+      - CHROMA_HTTP_HOST=chroma
+      - CHROMA_HTTP_PORT=8000
+      - CHROMA_COLLECTION=image_rag
+      - UPLOAD_DIR=/app/uploads
+      - MAX_UPLOAD_MB=10
+      - CLIP_MODEL_NAME=openai/clip-vit-base-patch32
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=llava
+      - OLLAMA_TIMEOUT_SECONDS=120
+      - OLLAMA_MAX_RETRIES=3
+      - TOP_K=5
+    volumes:
+      - uploads_data:/app/uploads
+      - clip_cache:/root/.cache/huggingface
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    networks:
+      - rag-network
+    depends_on:
+      chroma:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s    # CLIP model download + load can take time on first run
+    deploy:
+      resources:
+        limits:
+          memory: 4G        # CLIP + PyTorch need memory
+        reservations:
+          memory: 2G
+
+  # ── ChromaDB Vector Database ──────────────────────────
+  chroma:
+    image: chromadb/chroma:0.5.4
+    container_name: image-rag-chroma
+    restart: unless-stopped
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+      - PERSIST_DIRECTORY=/chroma/chroma
+    volumes:
+      - chroma_data:/chroma/chroma
+    ports:
+      - "${CHROMA_PORT:-8001}:8000"
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ── Ollama LLM Server ────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: image-rag-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  # ── React Frontend ───────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=http://localhost:${BACKEND_PORT:-8000}
+    container_name: image-rag-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    networks:
+      - rag-network
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5173/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+# ── Named volumes for data persistence ─────────────────
+volumes:
+  uploads_data:
+    driver: local
+    name: image-rag-uploads
+  chroma_data:
+    driver: local
+    name: image-rag-chroma-data
+  ollama_data:
+    driver: local
+    name: image-rag-ollama-data
+  clip_cache:
+    driver: local
+    name: image-rag-clip-cache
+
+# ── Isolated network ──────────────────────────────────
+networks:
+  rag-network:
+    driver: bridge
+    name: image-rag-net
